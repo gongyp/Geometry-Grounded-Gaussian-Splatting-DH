@@ -211,7 +211,7 @@ class GaussianModel:
         scales = scales_after_square.sqrt()
         return scales, opacity * coef[..., None]
 
-    def get_apperance_embedding(self, idx):
+    def get_appearance_embedding(self, idx):
         return self._appearance_embeddings[idx]
 
     def get_covariance(self, scaling_modifier=1):

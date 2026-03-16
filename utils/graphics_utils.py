@@ -220,23 +220,6 @@ def check_geometric_consistency(
     return mask, depth_reprojected, x2d_src, y2d_src, relative_depth_diff
 
 
-def patch_offsets(h_patch_size, device):
-    offsets = torch.arange(-h_patch_size, h_patch_size + 1, device=device, dtype=torch.float32)
-    return torch.stack(torch.meshgrid(offsets, offsets, indexing="xy")[::-1], dim=-1).view(1, -1, 2)
-
-
-def patch_warp(H, uv):
-    B, P = uv.shape[:2]
-    H = H.view(B, 3, 3)
-    ones = torch.ones((B, P, 1), device=uv.device)
-    homo_uv = torch.cat((uv, ones), dim=-1)
-
-    grid_tmp = torch.einsum("bik,bpk->bpi", H, homo_uv)
-    grid_tmp = grid_tmp.reshape(B, P, 3)
-    grid = grid_tmp[..., :2] / (grid_tmp[..., 2:] + 1e-10)
-    return grid
-
-
 def get_points_depth_in_depth_map(fov_camera, depth, points_in_camera_space, scale=1):
     st = max(int(scale / 2) - 1, 0)
     depth_view = depth[None, :, st::scale, st::scale]

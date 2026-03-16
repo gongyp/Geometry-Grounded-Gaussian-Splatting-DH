@@ -158,8 +158,8 @@ https://github.com/graphdeco-inria/gaussian-splatting
 ## 5. Acknowledgements
 
 This project builds on **Gaussian Splatting** and **RaDe-GS**:  
-https://github.com/graphdeco-inria/gaussian-splatting
-https://github.com/HKUST-SAIL/RaDe-GS
+- https://github.com/graphdeco-inria/gaussian-splatting
+- https://github.com/HKUST-SAIL/RaDe-GS
 
 We refer to **gsplat** for its use of warp-level reduction to accelerate the backward pass.  
 https://github.com/nerfstudio-project/gsplat
@@ -171,9 +171,9 @@ We integrate:
 - Densification strategy from **GOF**:  
   https://github.com/autonomousvision/gaussian-opacity-fields
 - Filters from **Mip-Splatting**: https://github.com/autonomousvision/mip-splatting  
-- Spherical Gaussian apperance model from **RayGauss** and **RayGaussX**
-  https://github.com/hugobl1/ray_gauss
-  https://github.com/hugobl1/raygaussx
+- Spherical Gaussian appearance model from **RayGauss** and **RayGaussX**
+  - https://github.com/hugobl1/ray_gauss
+  - https://github.com/hugobl1/raygaussx
 - Appearance models from **Gaussian Splatting**, **GOF**, and **PGSR**.  
 Evaluation toolkits:
 - DTU: https://github.com/jzhangbs/DTUeval-python  

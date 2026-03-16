@@ -17,10 +17,6 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from fused_ssim import fused_ssim
 from scene import GaussianModel, Camera
-from utils.graphics_utils import (
-    patch_offsets,
-    patch_warp,
-)
 from gaussian_renderer import sample_depth, render
 import warp_patch_ncc
 
@@ -91,7 +87,7 @@ def L1_loss_appearance(image, gt_image, gaussians, view_idx):
     app_model = gaussians.app_model
     if app_model is GaussianModel.App_model.NO:
         return l1_loss(image, gt_image)
-    appearance_embedding = gaussians.get_apperance_embedding(view_idx)
+    appearance_embedding = gaussians.get_appearance_embedding(view_idx)
 
     if app_model is GaussianModel.App_model.GS:
         exposure = appearance_embedding
@@ -124,20 +120,38 @@ def L1_loss_appearance(image, gt_image, gaussians, view_idx):
 
 
 class PatchMatch:
-    def __init__(self, patch_size, pixel_noise_th, kernel_size, pipe, debug=True, model_path=None):
+    def __init__(
+        self,
+        patch_size,
+        pixel_noise_th,
+        kernel_size,
+        pipe,
+        debug=True,
+        model_path=None,
+        optimize_geo=True,
+        optimize_ncc=True,
+    ):
         self.patch_size = patch_size
         self.total_patch_size = (patch_size * 2 + 1) ** 2
         self.pixel_noise_th = pixel_noise_th
-        self.offsets = patch_offsets(patch_size, device="cuda") * 0.5
-        self.offsets.requires_grad_(False)
         self.kernel_size = kernel_size
         self.pipe = pipe
         self.debug = debug
         self.model_path = model_path
+        self.optimize_geo = optimize_geo
+        self.optimize_ncc = optimize_ncc
         if debug:
             os.makedirs(os.path.join(model_path, "debug"), exist_ok=True)
 
-    def __call__(self, gaussians: GaussianModel, render_pkg: dict, viewpoint_cam: Camera, nearest_cam: Camera, iteration=0, depth_normal=None):
+    def __call__(
+        self,
+        gaussians: GaussianModel,
+        render_pkg: dict,
+        viewpoint_cam: Camera,
+        nearest_cam: Camera,
+        iteration=0,
+        depth_normal=None,
+    ):
         if nearest_cam is None:
             return torch.tensor([0], dtype=torch.float32, device="cuda"), torch.tensor([0], dtype=torch.float32, device="cuda")
         H, W = viewpoint_cam.image_height, viewpoint_cam.image_width
@@ -150,41 +164,48 @@ class PatchMatch:
             )
             nearest_to_view_R = nearest_cam.R.transpose(1, 0) @ viewpoint_cam.world_view_transform[:3, :3]
 
-        # pts = (rays_d * render_pkg["median_depth"].squeeze().unsqueeze(-1)).reshape(-1, 3)
-        depth_reshape = render_pkg["median_depth"].squeeze().unsqueeze(-1)
-        pts = torch.cat([depth_reshape * ix[None, :, None], depth_reshape * iy[:, None, None], depth_reshape], dim=-1)
+        with torch.set_grad_enabled(self.optimize_geo):
+            depth_reshape = render_pkg["median_depth"].squeeze().unsqueeze(-1)
+            pts = torch.cat(
+                [
+                    depth_reshape * ix[None, :, None],
+                    depth_reshape * iy[:, None, None],
+                    depth_reshape,
+                ],
+                dim=-1,
+            )
 
-        R = viewpoint_cam.R
-        T = viewpoint_cam.T
-        pts = (pts - T) @ R.T
-        sampled_pkg = sample_depth(
-            pts,
-            nearest_cam,
-            gaussians,
-            self.pipe,
-            self.kernel_size,
-        )
+            R = viewpoint_cam.R
+            T = viewpoint_cam.T
+            pts = (pts - T) @ R.T
+            sampled_pkg = sample_depth(
+                pts,
+                nearest_cam,
+                gaussians,
+                self.pipe,
+                self.kernel_size,
+            )
 
-        pts_in_nearest_cam = sampled_pkg["sampled_depth"]
-        R = nearest_cam.R
-        T = nearest_cam.T
+            pts_in_nearest_cam = sampled_pkg["sampled_depth"]
+            R = nearest_cam.R
+            T = nearest_cam.T
 
-        pts_in_view_cam = view_to_nearest_T + pts_in_nearest_cam @ nearest_to_view_R
-        pts_projections = pts_in_view_cam[..., :2] / torch.clamp_min(pts_in_view_cam[..., 2:], 1e-7)
-        pts_projections = torch.addcmul(
-            pts_projections.new_tensor([viewpoint_cam.Cx, viewpoint_cam.Cy]),
-            pts_projections.new_tensor([viewpoint_cam.Fx, viewpoint_cam.Fy]),
-            pts_projections,
-        )
+            pts_in_view_cam = view_to_nearest_T + pts_in_nearest_cam @ nearest_to_view_R
+            pts_projections = pts_in_view_cam[..., :2] / torch.clamp_min(pts_in_view_cam[..., 2:], 1e-7)
+            pts_projections = torch.addcmul(
+                pts_projections.new_tensor([viewpoint_cam.Cx, viewpoint_cam.Cy]),
+                pts_projections.new_tensor([viewpoint_cam.Fx, viewpoint_cam.Fy]),
+                pts_projections,
+            )
 
-        ix, iy = torch.meshgrid(
-            torch.arange(W, device="cuda", dtype=torch.int32),
-            torch.arange(H, device="cuda", dtype=torch.int32),
-            indexing="xy",
-        )
-        pixels = torch.stack([ix, iy], dim=-1)
-        pixel_f = pixels.type(torch.float32).requires_grad_(False)
-        pixel_noise = torch.pairwise_distance(pts_projections, pixel_f)
+            ix, iy = torch.meshgrid(
+                torch.arange(W, device="cuda", dtype=torch.int32),
+                torch.arange(H, device="cuda", dtype=torch.int32),
+                indexing="xy",
+            )
+            pixels = torch.stack([ix, iy], dim=-1)
+            pixel_f = pixels.type(torch.float32).requires_grad_(False)
+            pixel_noise = torch.pairwise_distance(pts_projections, pixel_f)
 
         with torch.no_grad():
             d_mask = (
@@ -200,7 +221,9 @@ class PatchMatch:
 
         if iteration % 200 == 0 and self.debug:
             with torch.no_grad():
-                gt_img_show = (viewpoint_cam.original_image.permute(1, 2, 0).clamp(0, 1)[:, :, [2, 1, 0]] * 255).detach().cpu().numpy().astype(np.uint8)
+                gt_img_show = (
+                    (viewpoint_cam.original_image.permute(1, 2, 0).clamp(0, 1)[:, :, [2, 1, 0]] * 255).detach().cpu().numpy().astype(np.uint8)
+                )
                 img_show = ((render_pkg["render"]).permute(1, 2, 0).clamp(0, 1)[:, :, [2, 1, 0]] * 255).detach().cpu().numpy().astype(np.uint8)
                 normal_show = (((render_pkg["normal"] + 1.0) * 0.5).permute(1, 2, 0).clamp(0, 1) * 255).detach().cpu().numpy().astype(np.uint8)
                 if depth_normal is None:
@@ -218,12 +241,26 @@ class PatchMatch:
                 row0 = np.concatenate([gt_img_show, img_show, depth_normal_show], axis=1)
                 row1 = np.concatenate([d_mask_show_color, depth_color, normal_show], axis=1)
                 image_to_show = np.concatenate([row0, row1], axis=0)
-                cv2.imwrite(os.path.join(self.model_path, "debug", "%05d" % iteration + "_" + viewpoint_cam.image_name + ".jpg"), image_to_show)
+                cv2.imwrite(
+                    os.path.join(
+                        self.model_path,
+                        "debug",
+                        "%05d" % iteration + "_" + viewpoint_cam.image_name + ".jpg",
+                    ),
+                    image_to_show,
+                )
         ################## Compute NCC for warped patches ##################
         if not d_mask.any():
             return torch.tensor([0], dtype=torch.float32, device="cuda"), torch.tensor([0], dtype=torch.float32, device="cuda")
 
-        geo_loss = ((weights * pixel_noise)[d_mask]).mean()
+        if self.optimize_geo:
+            geo_loss = (weights * pixel_noise)[d_mask].mean()
+        else:
+            geo_loss = torch.tensor([0], dtype=torch.float32, device="cuda")
+
+        if not self.optimize_ncc:
+            return torch.tensor([0], dtype=torch.float32, device="cuda"), geo_loss
+
         with torch.no_grad():
             d_mask = torch.flatten(d_mask)
             valid_indices = torch.argwhere(d_mask).squeeze(1)

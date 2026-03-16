@@ -69,15 +69,16 @@ def training(
     else:
         gaussians.compute_3D_filter(cameras=trainCameras)
 
-    if opt.lambda_multi_view_ncc > 0 or opt.lambda_multi_view_geo > 0:
-        patchmatch = PatchMatch(
-            opt.multi_view_patch_size,
-            opt.multi_view_pixel_noise_th,
-            kernel_size=kernel_size,
-            pipe=pipe,
-            debug=True,
-            model_path=dataset.model_path,
-        )
+    patchmatch = PatchMatch(
+        opt.multi_view_patch_size,
+        opt.multi_view_pixel_noise_th,
+        kernel_size=kernel_size,
+        pipe=pipe,
+        debug=True,
+        model_path=dataset.model_path,
+        optimize_geo=opt.lambda_multi_view_geo > 0,
+        optimize_ncc=opt.lambda_multi_view_ncc > 0,
+    )
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
@@ -122,7 +123,7 @@ def training(
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
-            if gaussians.max_sh_degree == gaussians.max_sh_degree:
+            if gaussians.active_sh_degree == gaussians.max_sh_degree:
                 gaussians.unlockSGdegree(100)
             gaussians.oneupSHdegree()
 
@@ -160,13 +161,13 @@ def training(
             rendered_normal: torch.Tensor = render_pkg["normal"]
             depth_normal, valid_points = depth_to_normal(viewpoint_cam, depth_map)
             normal_error_map = 1 - torch.linalg.vecdot(rendered_normal, depth_normal, dim=0)
-            depth_normal_loss = torch.where(valid_points.squeeze(), normal_error_map, torch.zeros_like(normal_error_map)).mean()
+            depth_normal_loss = normal_error_map.masked_fill_(~valid_points.squeeze(), 0.0).mean()
         else:
             depth_normal = None
             depth_normal_loss = torch.tensor([0], dtype=torch.float32, device="cuda")
 
         # patch match loss
-        if reg_kick_on and (opt.lambda_multi_view_ncc > 0 or opt.lambda_multi_view_geo):
+        if reg_kick_on and (opt.lambda_multi_view_ncc > 0 or opt.lambda_multi_view_geo > 0):
             nearest_cam = None if len(viewpoint_cam.nearest_id) == 0 else scene.getTrainCameras()[sample(viewpoint_cam.nearest_id, 1)[0]]
             ncc_loss, geo_loss = patchmatch(gaussians, render_pkg, viewpoint_cam, nearest_cam, iteration, depth_normal)
         else:
