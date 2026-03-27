@@ -610,6 +610,13 @@ class GaussianModel:
         self.active_sh_degree = self.max_sh_degree
         self.active_sg_degree = self.max_sg_degree
 
+        # Initialize max_radii2D to zeros (required for pruning)
+        num_points = self.get_xyz.shape[0]
+        self.max_radii2D = torch.zeros((num_points), device="cuda")
+        self.xyz_gradient_accum = torch.zeros((num_points, 1), device="cuda")
+        self.xyz_gradient_accum_abs = torch.zeros((num_points, 1), device="cuda")
+        self.denom = torch.zeros((num_points, 1), device="cuda")
+
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -633,6 +640,10 @@ class GaussianModel:
             if group["name"] in ["appearance_embeddings", "appearance_network"]:
                 continue
             stored_state = self.optimizer.state.get(group["params"][0], None)
+            # Ensure mask is on same device as param before indexing
+            param = group["params"][0]
+            if mask.device != param.device:
+                mask = mask.to(device=param.device)
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
                 stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
@@ -649,6 +660,9 @@ class GaussianModel:
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
+        # Ensure mask is on same device as tensors before indexing
+        if hasattr(self, '_xyz') and valid_points_mask.device != self._xyz.device:
+            valid_points_mask = valid_points_mask.to(device=self._xyz.device)
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         self._xyz = optimizable_tensors["xyz"]
@@ -661,13 +675,27 @@ class GaussianModel:
         self._sg_sharpness = optimizable_tensors["sg_sharpness"]
         self._sg_color = optimizable_tensors["sg_color"]
 
+        # Prune gradient accumulators
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.xyz_gradient_accum_abs = self.xyz_gradient_accum_abs[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
+
+        # Ensure max_radii2D is on same device and prune
+        if self.max_radii2D.device != valid_points_mask.device:
+            self.max_radii2D = self.max_radii2D.to(device=valid_points_mask.device)
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+
+        # Prune filter_3D to maintain consistency with optimizer params
+        if hasattr(self, 'filter_3D'):
+            if self.filter_3D.device != valid_points_mask.device:
+                self.filter_3D = self.filter_3D.to(device=valid_points_mask.device)
+            self.filter_3D = self.filter_3D[valid_points_mask]
 
     def prune_points_inference(self, mask):
         valid_points_mask = ~mask
+        # Ensure mask is on same device as tensors before indexing
+        if hasattr(self, '_xyz') and valid_points_mask.device != self._xyz.device:
+            valid_points_mask = valid_points_mask.to(device=self._xyz.device)
 
         self._xyz = self._xyz[valid_points_mask]
         self._features_dc = self._features_dc[valid_points_mask]
@@ -678,7 +706,11 @@ class GaussianModel:
         self._sg_axis = self._sg_axis[valid_points_mask]
         self._sg_sharpness = self._sg_sharpness[valid_points_mask]
         self._sg_color = self._sg_color[valid_points_mask]
-        self.filter_3D = self.filter_3D[valid_points_mask]
+        # Prune filter_3D with device check
+        if hasattr(self, 'filter_3D'):
+            if self.filter_3D.device != valid_points_mask.device:
+                self.filter_3D = self.filter_3D.to(device=valid_points_mask.device)
+            self.filter_3D = self.filter_3D[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -733,6 +765,14 @@ class GaussianModel:
         self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+        # Extend filter_3D to maintain consistency with optimizer params
+        if hasattr(self, 'filter_3D'):
+            old_size = self.filter_3D.shape[0]
+            new_size = self.get_xyz.shape[0]
+            if new_size > old_size:
+                new_filter = torch.zeros((new_size - old_size, 1), device="cuda")
+                self.filter_3D = torch.cat([self.filter_3D, new_filter], dim=0)
 
     def densify_and_split(self, grads, grad_threshold, grads_abs, grad_abs_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
