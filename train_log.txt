@@ -1,0 +1,24 @@
+Optimizing output/Cone_day_0_base
+Output folder: output/Cone_day_0_base [27/03 09:54:42]
+/data/Geometry-Grounded-Gaussian-Splatting/eval_update/cl-splats-dataset/Real-World/cone_day_0 [27/03 09:54:42]
+Reading camera 1/146/data/Geometry-Grounded-Gaussian-Splatting/utils/graphics_utils.py:100: RuntimeWarning: overflow encountered in scalar divide
+  return 2 * math.atan(pixels / (2 * focal))
+Reading camera 2/146Reading camera 3/146Reading camera 4/146Reading camera 5/146Reading camera 6/146Reading camera 7/146Reading camera 8/146Reading camera 9/146Reading camera 10/146Reading camera 11/146Reading camera 12/146Reading camera 13/146Reading camera 14/146Reading camera 15/146Reading camera 16/146Reading camera 17/146Reading camera 18/146Reading camera 19/146Reading camera 20/146Reading camera 21/146Reading camera 22/146Reading camera 23/146Reading camera 24/146Reading camera 25/146Reading camera 26/146Reading camera 27/146Reading camera 28/146Reading camera 29/146Reading camera 30/146Reading camera 31/146Reading camera 32/146Reading camera 33/146Reading camera 34/146Reading camera 35/146Reading camera 36/146Reading camera 37/146Reading camera 38/146Reading camera 39/146Reading camera 40/146Reading camera 41/146Reading camera 42/146Reading camera 43/146Reading camera 44/146Reading camera 45/146Reading camera 46/146Reading camera 47/146Reading camera 48/146Reading camera 49/146Reading camera 50/146Reading camera 51/146Reading camera 52/146Reading camera 53/146Reading camera 54/146Reading camera 55/146Reading camera 56/146Reading camera 57/146Reading camera 58/146Reading camera 59/146Reading camera 60/146Reading camera 61/146Reading camera 62/146Reading camera 63/146Reading camera 64/146Reading camera 65/146Reading camera 66/146Reading camera 67/146Reading camera 68/146Reading camera 69/146Reading camera 70/146Reading camera 71/146Reading camera 72/146Reading camera 73/146Reading camera 74/146Reading camera 75/146Reading camera 76/146Reading camera 77/146Reading camera 78/146Reading camera 79/146Reading camera 80/146Reading camera 81/146Reading camera 82/146Reading camera 83/146Reading camera 84/146Reading camera 85/146Reading camera 86/146Reading camera 87/146Reading camera 88/146Reading camera 89/146Reading camera 90/146Reading camera 91/146Reading camera 92/146Reading camera 93/146Reading camera 94/146Reading camera 95/146Reading camera 96/146Reading camera 97/146Reading camera 98/146Reading camera 99/146Reading camera 100/146Reading camera 101/146Reading camera 102/146Reading camera 103/146Reading camera 104/146Reading camera 105/146Reading camera 106/146Reading camera 107/146Reading camera 108/146Reading camera 109/146Reading camera 110/146Reading camera 111/146Reading camera 112/146Reading camera 113/146Reading camera 114/146Reading camera 115/146Reading camera 116/146Reading camera 117/146Reading camera 118/146Reading camera 119/146Reading camera 120/146Reading camera 121/146Reading camera 122/146Reading camera 123/146Reading camera 124/146Reading camera 125/146Reading camera 126/146Reading camera 127/146Reading camera 128/146Reading camera 129/146Reading camera 130/146Reading camera 131/146Reading camera 132/146Reading camera 133/146Reading camera 134/146Reading camera 135/146Reading camera 136/146Reading camera 137/146Reading camera 138/146Reading camera 139/146Reading camera 140/146Reading camera 141/146Reading camera 142/146Reading camera 143/146Reading camera 144/146Reading camera 145/146Reading camera 146/146 [27/03 09:54:43]
+cameras extent: 27.264873504638672 [27/03 09:54:43]
+Loading Training Cameras: 146 . [27/03 09:54:47]
+Loading Test Cameras: 0 . [27/03 09:54:47]
+computing nearest_id [27/03 09:54:47]
+Number of points at initialisation :  83049 [27/03 09:54:47]
+Training progress:   0%|          | 0/500 [00:00<?, ?it/s]Traceback (most recent call last):
+  File "/data/Geometry-Grounded-Gaussian-Splatting/train.py", line 395, in <module>
+    training(
+  File "/data/Geometry-Grounded-Gaussian-Splatting/train.py", line 166, in training
+    depth_normal_loss = torch.tensor([0], dtype=torch.float32, device="cuda")
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.AcceleratorError: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Training progress:   0%|          | 0/500 [00:01<?, ?it/s]
