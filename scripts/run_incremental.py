@@ -51,6 +51,8 @@ def parse_args():
                         help="Enable change detection")
     parser.add_argument("--change_threshold", type=float, default=0.8,
                         help="Change detection threshold")
+    parser.add_argument("--new_camera_ids", type=str, default=None,
+                        help="Comma-separated list of camera IDs for change detection (e.g., '2' or '1,2,3'). If None, all cameras are used.")
 
     # Densification
     parser.add_argument("--densify", action="store_true", default=False,
@@ -209,6 +211,12 @@ def main():
         clsplats_config=clsplats_cfg,
     )
 
+    # Parse new_camera_ids for selective change detection
+    change_detection_camera_ids = None
+    if args.new_camera_ids is not None:
+        change_detection_camera_ids = [int(x.strip()) for x in args.new_camera_ids.split(',')]
+        log.info(f"Change detection will use only camera IDs: {change_detection_camera_ids}")
+
     # Prepare target images
     target_images = []
     for cam in cameras:
@@ -230,6 +238,7 @@ def main():
         new_cameras=cameras,
         new_images=target_images,
         detect_changes=args.detect_changes,
+        change_detection_camera_ids=change_detection_camera_ids,
     )
 
     log.info(f"Training complete!")

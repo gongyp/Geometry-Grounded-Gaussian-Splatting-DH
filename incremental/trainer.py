@@ -205,32 +205,56 @@ class IncrementalTrainer:
     def lift_changes_to_3d(
         self,
         change_masks: List[torch.Tensor],
+        cameras: List = None,
     ) -> torch.Tensor:
         """Lift 2D change masks to 3D Gaussian mask.
 
         Args:
             change_masks: List of change masks for each camera
+            cameras: List of cameras corresponding to change_masks
 
         Returns:
             3D change mask: (N,) boolean mask for Gaussians
         """
         if self.sg_lifter is not None:
-            # Use SG-aware lifter
+            # Use SG-aware lifter (use cameras param, not self.cameras)
             result = self.sg_lifter.lift_with_sg(
                 self.adapter,
-                self.cameras,
+                cameras,  # Use the filtered cameras that have change_masks
                 change_masks,
             )
             return result.positive_mask
 
         elif self.lifter is not None:
             # Use base lifter
-            result = self.lifter.lift(self.adapter, self.cameras, change_masks)
+            result = self.lifter.lift(self.adapter, cameras, change_masks)
             return result.positive_mask
 
         else:
-            # Fallback: no lifting, return all active
-            return self.adapter.get_active_mask()
+            # Fallback: use visibility from change detection cameras
+            # Combine visibility filters from all cameras used for change detection
+            # This limits updates to Gaussians visible in the change detection views
+            log.info("Using simplified active mask from visibility filters")
+            if cameras is not None:
+                active_mask = torch.zeros(
+                    self.adapter.num_gaussians,
+                    dtype=torch.bool,
+                    device=self.device,
+                )
+                for cam, change_mask in zip(cameras, change_masks):
+                    # Render to get visibility
+                    output = self.render_camera(cam)
+                    visibility_filter = output.get("visibility_filter", None)
+                    if visibility_filter is not None:
+                        # Only mark Gaussians as active if they are:
+                        # 1. Visible in this camera AND
+                        # 2. Contributing to changed pixels
+                        # For simplicity, we use visibility as proxy
+                        active_mask |= visibility_filter
+                        log.info(f"Camera {cam.colmap_id if hasattr(cam, 'colmap_id') else '?'}: {visibility_filter.sum()} visible Gaussians")
+                return active_mask
+            else:
+                return self.adapter.get_active_mask()
 
     def compute_render_loss(
         self,
@@ -779,13 +803,16 @@ class IncrementalTrainer:
         new_cameras: List,
         new_images: List[torch.Tensor],
         detect_changes: bool = True,
+        change_detection_camera_ids: List[int] = None,
     ) -> Dict[str, Any]:
         """Run incremental update with new observations.
 
         Args:
-            new_cameras: List of new cameras
+            new_cameras: List of cameras for training
             new_images: List of target images
             detect_changes: Whether to detect changes
+            change_detection_camera_ids: List of camera IDs to use for change detection.
+                                         If None, uses all cameras (backward compatible).
 
         Returns:
             Dict with training results
@@ -793,17 +820,35 @@ class IncrementalTrainer:
         log.info(f"Starting incremental update with {len(new_cameras)} views")
         log.info(f"Change detection enabled: {detect_changes}")
         log.info(f"Detector available: {self.detector is not None}")
+        log.info(f"Change detection camera IDs: {change_detection_camera_ids}")
 
         # Set up active mask (all Gaussians initially)
         N = self.adapter.num_gaussians
         self.active_mask = torch.ones(N, dtype=torch.bool, device=self.device)
 
-        # If change detection is enabled
-        if detect_changes and self.detector is not None:
+        # If change detection is enabled (supports fallback if detector is None)
+        if detect_changes:
+            # Determine which cameras to use for change detection
+            if change_detection_camera_ids is not None:
+                # Filter to only use specified cameras for change detection
+                cd_cameras = []
+                cd_images = []
+                for cam, img in zip(new_cameras, new_images):
+                    if hasattr(cam, 'colmap_id') and cam.colmap_id in change_detection_camera_ids:
+                        cd_cameras.append(cam)
+                        cd_images.append(img)
+                log.info(f"Filtered to {len(cd_cameras)} cameras for change detection")
+            else:
+                # Use all cameras (backward compatible)
+                cd_cameras = new_cameras
+                cd_images = new_images
+
             log.info("Running change detection...")
+            if self.detector is None:
+                log.info("Using fallback change detection (simple difference)")
             change_masks = []
 
-            for i, (camera, target) in enumerate(zip(new_cameras, new_images)):
+            for i, (camera, target) in enumerate(zip(cd_cameras, cd_images)):
                 # Render current state
                 output = self.render_camera(camera)
                 rendered = output["image"]
@@ -811,18 +856,29 @@ class IncrementalTrainer:
                 # Detect changes
                 change_mask = self.detect_changes(rendered, target)
                 change_masks.append(change_mask)
-                log.info(f"Camera {i}: change mask sum = {change_mask.sum()}")
+                cam_id = camera.colmap_id if hasattr(camera, 'colmap_id') else i
+                log.info(f"Camera {cam_id}: change mask sum = {change_mask.sum()}")
 
             # Lift changes to 3D
             log.info("Lifting 2D changes to 3D...")
-            self.active_mask = self.lift_changes_to_3d(change_masks)
+            self.active_mask = self.lift_changes_to_3d(change_masks, cd_cameras)
 
             log.info(f"Active Gaussians after change detection: {self.active_mask.sum()} / {N}")
         else:
             log.info("Change detection skipped, using all Gaussians")
 
         # Train
-        metrics = self.train_timestep(new_cameras, new_images)
+        # Use only the cameras that were used for change detection to avoid
+        # pulling active Gaussians toward views that don't see the changed regions
+        if change_detection_camera_ids is not None:
+            train_cameras = cd_cameras
+            train_images = cd_images
+            log.info(f"Training with {len(train_cameras)} cameras (change detection subset)")
+        else:
+            train_cameras = new_cameras
+            train_images = new_images
+
+        metrics = self.train_timestep(train_cameras, train_images)
 
         # Final densify and prune
         self.densify_and_prune()
