@@ -226,12 +226,16 @@ def training(
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    num_gaussians_before = gaussians.get_xyz.shape[0]
+                    print(f"[ITER {iteration}] Gaussians before densify: {num_gaussians_before}")
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
                         0.05,
                         scene.cameras_extent,
                         size_threshold,
                     )
+                    num_gaussians_after = gaussians.get_xyz.shape[0]
+                    print(f"[ITER {iteration}] Gaussians after densify: {num_gaussians_after}")
                     if dataset.disable_filter3D:
                         gaussians.reset_3D_filter()
                     else:

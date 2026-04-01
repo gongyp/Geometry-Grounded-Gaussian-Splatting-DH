@@ -19,7 +19,7 @@ sys.path.insert(0, '/data/Geometry-Grounded-Gaussian-Splatting/submodules/cl-spl
 from scene.gaussian_model import GaussianModel
 from .gaussian_adapter import GGSGaussianAdapter
 from .render_adapter import GGSRenderAdapter
-from .lifter import SGAwareLifter, create_sg_aware_lifter
+from .lifter.depth_anything_lifter import DepthAnythingLifter
 
 # Import cl-splats components
 try:
@@ -154,13 +154,23 @@ class IncrementalTrainer:
         self.lifter = None
         self.sg_lifter = None
         if CL_SPLATS_AVAILABLE and self.clsplats_cfg is not None:
-            from clsplats.lifter.depth_anything_lifter import DepthAnythingLifter
-            base_lifter = DepthAnythingLifter(self.clsplats_cfg)
-            self.sg_lifter = create_sg_aware_lifter(
-                base_lifter,
-                use_sg_guidance=self.cfg.use_sg_guidance,
-                sg_weight=self.cfg.sg_lift_weight,
+            from .lifter.depth_anything_lifter import DepthAnythingLifter
+            base_lifter = DepthAnythingLifter(
+                depth_model=self.clsplats_cfg.lifter.depth_model,
+                k_nn=self.clsplats_cfg.lifter.k_nn,
+                local_radius_thresh=self.clsplats_cfg.lifter.local_radius_thresh,
+                depth_tol_abs=self.clsplats_cfg.lifter.depth_tol_abs,
+                depth_tol_rel=self.clsplats_cfg.lifter.depth_tol_rel,
+                lambda_seed=self.clsplats_cfg.lifter.lambda_seed,
+                lambda_neg=self.clsplats_cfg.lifter.lambda_neg,
+                min_visible_views=self.clsplats_cfg.lifter.min_visible_views,
+                min_positive_views=self.clsplats_cfg.lifter.min_positive_views,
+                min_seed_views=self.clsplats_cfg.lifter.min_seed_views,
+                min_positive_ratio=self.clsplats_cfg.lifter.min_positive_ratio,
+                final_thresh=self.clsplats_cfg.lifter.final_thresh,
             )
+            # Use the new lifter directly
+            self.sg_lifter = base_lifter
 
         # Training state
         self.timestep = 0
@@ -218,7 +228,7 @@ class IncrementalTrainer:
         """
         if self.sg_lifter is not None:
             # Use SG-aware lifter (use cameras param, not self.cameras)
-            result = self.sg_lifter.lift_with_sg(
+            result = self.sg_lifter.lift(
                 self.adapter,
                 cameras,  # Use the filtered cameras that have change_masks
                 change_masks,

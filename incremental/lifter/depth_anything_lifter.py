@@ -1,17 +1,19 @@
-"""SG-Aware Lifter.
+"""Depth-Anything V2 lifter.
 
-Extends the DepthAnythingLifter to support Spherical Gaussian (SG) features
-for more accurate 2D->3D lifting.
+Estimates monocular depth using Depth-Anything V2 from HuggingFace and
+lifts 2-D change masks into a per-Gaussian change mask using multi-view
+depth back-projection and Gaussian proximity scoring.
 
-This implementation mirrors depth_anything_lifter.py exactly, using faiss.knn
-for memory-efficient kNN queries.
+This is the reference implementation from submodules/cl-splats, adapted for
+use with GGSGaussianAdapter.
 """
 
-import torch
-import faiss
 import numpy as np
-from typing import Optional, Dict, List
+import torch
+from PIL import Image as PILImage
+from typing import List, Optional
 from dataclasses import dataclass
+import faiss
 
 
 @dataclass
@@ -24,72 +26,92 @@ class LiftResult:
     depth_consistency: Optional[torch.Tensor] = None  # (N,) Depth consistency score
 
 
-class SGAwareLifter:
-    """Lifter that considers SG features for depth lifting.
-
-    This lifter extends the standard depth lifting to incorporate
-    Spherical Gaussian features for better spatial awareness.
-    """
+class DepthAnythingLifter:
+    """Lifter that uses Depth-Anything V2 for monocular depth estimation."""
 
     def __init__(
         self,
-        depth_lifter,  # Base lifter (DepthAnythingLifter)
-        use_sg_guidance: bool = True,
-        sg_weight: float = 0.3,
+        depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf",
+        k_nn: int = 8,
+        local_radius_thresh: float = 2.5,
+        depth_tol_abs: float = 0.05,
+        depth_tol_rel: float = 0.05,
+        lambda_seed: float = 2.0,
+        lambda_neg: float = 0.25,
+        min_visible_views: int = 2,
+        min_positive_views: int = 2,
+        min_seed_views: int = 1,
+        min_positive_ratio: float = 0.3,
+        final_thresh: float = 0.6,
     ):
-        """Initialize the SG-aware lifter.
+        """Initialize the Depth-Anything lifter."""
+        from transformers import pipeline as hf_pipeline
 
-        Args:
-            depth_lifter: The base DepthAnythingLifter instance
-            use_sg_guidance: Whether to use SG features for guidance
-            sg_weight: Weight for SG-based guidance (0-1)
+        self._pipe = hf_pipeline(task="depth-estimation", model=depth_model, device=0, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+
+        # Lifting hyper-parameters
+        self.k_nn = k_nn
+        self.local_radius_thresh = local_radius_thresh
+        self.depth_tol_abs = depth_tol_abs
+        self.depth_tol_rel = depth_tol_rel
+        self.lambda_seed = lambda_seed
+        self.lambda_neg = lambda_neg
+        self.min_visible_views = min_visible_views
+        self.min_positive_views = min_positive_views
+        self.min_seed_views = min_seed_views
+        self.min_positive_ratio = min_positive_ratio
+        self.final_thresh = final_thresh
+
+    @torch.no_grad()
+    def estimate_depth(self, observation: torch.Tensor) -> torch.Tensor:
+        """Estimate depth from an observation image ``[H, W, 3]`` in ``[0, 1]``.
+
+        Returns a depth map as a ``float32`` tensor ``[H, W]`` with metric depth
+        in meters (from Depth-Anything `predicted_depth`).
         """
-        self.base_lifter = depth_lifter
-        self.use_sg_guidance = use_sg_guidance
-        self.sg_weight = sg_weight
+        obs_np = (observation.clamp(0.0, 1.0).cpu().numpy() * 255.0).astype("uint8")
+        pil_img = PILImage.fromarray(obs_np)
 
-        # Forward compatible attributes
-        self.k_nn = getattr(depth_lifter, "k_nn", 8)
-        self.local_radius_thresh = getattr(depth_lifter, "local_radius_thresh", 2.5)
-        self.depth_tol_abs = getattr(depth_lifter, "depth_tol_abs", 0.05)
-        self.depth_tol_rel = getattr(depth_lifter, "depth_tol_rel", 0.05)
-        self.lambda_seed = getattr(depth_lifter, 'lambda_seed', 2.0)
-        self.lambda_neg = getattr(depth_lifter, 'lambda_neg', 0.25)
-        self.min_visible_views = getattr(depth_lifter, 'min_visible_views', 2)
-        self.min_positive_views = getattr(depth_lifter, 'min_positive_views', 2)
-        self.min_seed_views = getattr(depth_lifter, 'min_seed_views', 1)
-        self.min_positive_ratio = getattr(depth_lifter, 'min_positive_ratio', 0.3)
-        self.final_thresh = getattr(depth_lifter, 'final_thresh', 0.6)
+        # Use predicted_depth (metric depth in meters), not depth (uint8 [0-255])
+        depth_tensor = self._pipe(pil_img)["predicted_depth"]
+        # observation is [H, W, C], so use [:2] to get [H, W]
+        obs_h, obs_w = observation.shape[:2]
+        if depth_tensor.shape != (obs_h, obs_w):
+            import torch.nn.functional as F
+            depth_tensor = F.interpolate(
+                depth_tensor.unsqueeze(0).unsqueeze(0), size=(obs_h, obs_w), mode="bilinear", align_corners=False
+            ).squeeze(0).squeeze(0)
+        # Ensure positive depth values
+        depth_tensor = torch.clamp(depth_tensor, min=0.0)
+        return depth_tensor.float()
 
-    def batched_cdist(x1, x2, batch_size=1024):
-        """
-        x1: [N, D]
-        x2: [M, D]
-        return: dist [N, M]
-        """
-        N = x1.size(0)
-        dists = []
-        for i in range(0, N, batch_size):
-            x1_batch = x1[i:i+batch_size]  # [B, D]
-            dist_batch = torch.cdist(x1_batch, x2)  # [B, M]
-            dists.append(dist_batch)
-        return torch.cat(dists, dim=0)  # [N, M]
+    @torch.no_grad()
+    def faiss_knn(self, query, target, k=8):
+        # Use GPU faiss for fast kNN
+        q = query.cpu().numpy().astype('float32')
+        t = target.cpu().numpy().astype('float32')
 
-    def lift_with_sg(
+        # Create GPU index
+        res = faiss.StandardGpuResources()
+        index = faiss.GpuIndexFlatL2(res, query.shape[1], faiss.GpuIndexFlatConfig())
+        index.add(t)
+        dists, idx = index.search(q, k)
+        knn_dists = torch.from_numpy(dists).to(query.device)
+        knn_idx = torch.from_numpy(idx).to(query.device)
+        return knn_dists, knn_idx
+
+    @torch.no_grad()
+    def lift(
         self,
-        gaussians,  # GGSGaussianAdapter or similar
+        gaussians,  # GGSGaussianAdapter
         cameras: List,
         change_masks: List[torch.Tensor],
     ) -> LiftResult:
-        """Lift 2D change masks to 3D.
+        """Multi-view lifting.
 
-        This implementation mirrors depth_anything_lifter.py exactly,
-        using torch_cluster.knn for memory-efficient kNN queries.
-
-        Args:
-            gaussians: Gaussian adapter with positions and SG features
-            cameras: List of camera objects
-            change_masks: List of change masks for each camera
+        For each view, estimates depth with Depth-Anything, back-projects
+        changed pixels to 3-D, assigns evidence to nearby Gaussians, and
+        accumulates multi-view positive/negative evidence.
 
         Returns:
             LiftResult with positive mask and scores
@@ -97,11 +119,6 @@ class SGAwareLifter:
         device = gaussians.get_positions().device
         N = gaussians.num_gaussians
 
-        # Get Gaussian positions and scales
-        positions = gaussians.get_positions()
-        scales = gaussians.get_scales()  # (N, 3) linear scale values
-
-        # Initialize accumulators (same as reference)
         seed_score = torch.zeros(N, device=device)
         seed_votes = torch.zeros(N, device=device)
         neg_score = torch.zeros(N, device=device)
@@ -110,10 +127,12 @@ class SGAwareLifter:
         positive_views = torch.zeros(N, dtype=torch.int32, device=device)
         seed_views = torch.zeros(N, dtype=torch.int32, device=device)
 
-        # Process all cameras
+        positions = gaussians.get_positions()  # (N, 3)
+        scales = gaussians.get_scales()  # (N, 3)
+
         for view_id, (cam, mask) in enumerate(zip(cameras, change_masks)):
             obs = cam.original_image.permute(1, 2, 0).contiguous()
-            depth = self.base_lifter.estimate_depth(obs).to(device)  # [H, W]
+            depth = self.estimate_depth(obs).to(device)  # [H, W]
 
             H, W = depth.shape
             mask = mask.to(device)
@@ -122,7 +141,6 @@ class SGAwareLifter:
             pos_pixels = (mask > 0.5) & torch.isfinite(depth) & (depth > 0)
             if pos_pixels.any():
                 ys, xs = torch.nonzero(pos_pixels, as_tuple=True)
-
                 # Sub-sample to avoid OOM in the kNN distance matrix (M×N).
                 max_pos = min(ys.numel(), 2048)
                 if ys.numel() > max_pos:
@@ -131,7 +149,7 @@ class SGAwareLifter:
                     xs = xs[perm]
                 d = depth[ys, xs]
 
-                # Back-project to camera coordinates (same as reference)
+                # Back-project to camera coordinates
                 x_cam = (xs.float() - cam.Cx) / cam.Fx * d
                 y_cam = (ys.float() - cam.Cy) / cam.Fy * d
                 z_cam = d
@@ -143,11 +161,12 @@ class SGAwareLifter:
                 p_world = p_world_h[..., :3] / p_world_h[..., 3:]  # [M, 3]
 
                 # kNN in Gaussian means — cap M so cdist stays in memory
-                dists = self.batched_cdist(p_world, means, batch_size=512)  # [M, N]
-                knn_dists, knn_idx = torch.topk(dists, k=min(self.k_nn, N), dim=-1, largest=False)
-                del dists  # free immediately
+                # dists = torch.cdist(p_world, positions)  # [M, N]
+                # knn_dists, knn_idx = torch.topk(dists, k=min(self.k_nn, N), dim=-1, largest=False)
+                # del dists  # free immediately
+                knn_dists, knn_idx = self.faiss_knn(p_world, positions, k=min(self.k_nn, N))
 
-                # Local scale-aware distance (same as reference)
+                # Local scale-aware distance
                 local_scales = scales[knn_idx]  # [M, k, 3]
                 denom = local_scales.norm(dim=-1) + 1e-6  # [M, k]
                 d_local = knn_dists / denom
@@ -158,9 +177,9 @@ class SGAwareLifter:
                     # into camera space — (M, k, 4) instead of (M, N, 4).
                     Tcw = torch.inverse(Twc)  # [4, 4]
                     knn_means = positions[knn_idx]  # [M, k, 3]
-                    M_k = knn_means.shape[:2]
+                    M, k = knn_means.shape[:2]
                     knn_means_h = torch.cat(
-                        [knn_means, torch.ones(M_k[0], M_k[1], 1, device=device)], dim=-1
+                        [knn_means, torch.ones(M, k, 1, device=device)], dim=-1
                     )  # [M, k, 4]
                     knn_cam = knn_means_h @ Tcw.T  # [M, k, 4]
                     z_knn = knn_cam[..., 2]  # [M, k]
@@ -215,10 +234,11 @@ class SGAwareLifter:
                 p_world_h_n = p_cam_n @ Twc.T
                 p_world_n = p_world_h_n[..., :3] / p_world_h_n[..., 3:]
 
-                dists_n = self.batched_cdist(p_world_n, means, batch_size=512)  # [M, N]
-                knn_dists_n, knn_idx_n = torch.topk(
-                    dists_n, k=min(self.k_nn, N), dim=-1, largest=False
-                )   
+                # dists_n = torch.cdist(p_world_n, positions)
+                # knn_dists_n, knn_idx_n = torch.topk(
+                #     dists_n, k=min(self.k_nn, N), dim=-1, largest=False
+                # )
+                knn_dists_n, knn_idx_n = self.faiss_knn(p_world_n, positions, k=min(self.k_nn, N))
 
                 local_scales_n = scales[knn_idx_n]
                 denom_n = local_scales_n.norm(dim=-1) + 1e-6
@@ -247,13 +267,13 @@ class SGAwareLifter:
                     affected_n = torch.unique(flat_idx_n)
                     visible_views[affected_n] += 1
 
-        # Combine evidence (same as reference)
+        # Combine evidence
         pos = self.lambda_seed * seed_score
         neg = self.lambda_neg * neg_score
 
         score = pos / (pos + neg + 1e-8)
 
-        # Multi-view consistency filtering (same as reference)
+        # Multi-view consistency filtering
         keep = (
             (visible_views >= self.min_visible_views)
             & (positive_views >= self.min_positive_views)
@@ -275,19 +295,6 @@ class SGAwareLifter:
         )
 
 
-def create_sg_aware_lifter(base_lifter, use_sg_guidance: bool = True, sg_weight: float = 0.3):
-    """Create an SG-aware lifter from a base DepthAnythingLifter.
-
-    Args:
-        base_lifter: The base DepthAnythingLifter instance
-        use_sg_guidance: Whether to use SG features
-        sg_weight: Weight for SG guidance
-
-    Returns:
-        SGAwareLifter instance
-    """
-    return SGAwareLifter(
-        depth_lifter=base_lifter,
-        use_sg_guidance=use_sg_guidance,
-        sg_weight=sg_weight,
-    )
+def create_depth_anything_lifter(**kwargs):
+    """Create a DepthAnythingLifter instance."""
+    return DepthAnythingLifter(**kwargs)
