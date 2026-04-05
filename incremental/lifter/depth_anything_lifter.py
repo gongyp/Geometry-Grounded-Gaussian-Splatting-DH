@@ -14,6 +14,7 @@ from PIL import Image as PILImage
 from typing import List, Optional
 from dataclasses import dataclass
 import faiss
+from huggingface_hub import snapshot_download
 
 
 @dataclass
@@ -32,6 +33,7 @@ class DepthAnythingLifter:
     def __init__(
         self,
         depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf",
+        local_model_path: Optional[str] = "./models/depth-anything-v2-small",
         k_nn: int = 8,
         local_radius_thresh: float = 2.5,
         depth_tol_abs: float = 0.05,
@@ -44,10 +46,35 @@ class DepthAnythingLifter:
         min_positive_ratio: float = 0.3,
         final_thresh: float = 0.6,
     ):
-        """Initialize the Depth-Anything lifter."""
+        """Initialize the Depth-Anything lifter.
+
+        Args:
+            depth_model: HuggingFace model ID (used only to download on first run).
+            local_model_path: Local directory to cache the model. Defaults to
+                ``./models/depth-anything-v2-small``. On first call the model is
+                downloaded from HuggingFace if the directory does not exist.
+                Subsequent calls load directly from this local path.
+        """
         from transformers import pipeline as hf_pipeline
 
-        self._pipe = hf_pipeline(task="depth-estimation", model=depth_model, device=0, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+        if local_model_path is not None:
+            import os
+            if not os.path.isdir(local_model_path):
+                print(f"[DepthAnythingLifter] Downloading model to {local_model_path} ...")
+                snapshot_download(
+                    repo_id=depth_model,
+                    local_dir=local_model_path,
+                    endpoint="https://hf-mirror.com",
+                )
+            model_path = local_model_path
+        else:
+            # Download (if not already cached) and use the default cache location.
+            model_path = snapshot_download(
+                repo_id=depth_model,
+                endpoint="https://hf-mirror.com",
+            )
+
+        self._pipe = hf_pipeline(task="depth-estimation", model=model_path, device=0, torch_dtype=torch.float16, low_cpu_mem_usage=True)
 
         # Lifting hyper-parameters
         self.k_nn = k_nn
@@ -164,7 +191,7 @@ class DepthAnythingLifter:
                 # dists = torch.cdist(p_world, positions)  # [M, N]
                 # knn_dists, knn_idx = torch.topk(dists, k=min(self.k_nn, N), dim=-1, largest=False)
                 # del dists  # free immediately
-                knn_dists, knn_idx = self.faiss_knn(p_world, positions, k=min(self.k_nn, N))
+                knn_dists, knn_idx = self.faiss_knn(p_world, positions, k=min(self.k_nn, N))  # [M,k_nn]
 
                 # Local scale-aware distance
                 local_scales = scales[knn_idx]  # [M, k, 3]
