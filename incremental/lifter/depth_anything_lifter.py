@@ -112,20 +112,51 @@ class DepthAnythingLifter:
         depth_tensor = torch.clamp(depth_tensor, min=0.0)
         return depth_tensor.float()
 
-    @torch.no_grad()
-    def faiss_knn(self, query, target, k=8):
-        # Use GPU faiss for fast kNN
-        q = query.cpu().numpy().astype('float32')
+    def build_faiss_index(self, target):
+        """Build a FAISS GPU index for kNN search.
+
+        Call this once before calling search_with_index multiple times.
+
+        Args:
+            target: (N, D) tensor of target vectors (e.g., Gaussian positions)
+
+        Returns:
+            Tuple of (res, index) that should be passed to search_with_index
+        """
         t = target.cpu().numpy().astype('float32')
+        dim = t.shape[1]
 
         # Create GPU index
         res = faiss.StandardGpuResources()
-        index = faiss.GpuIndexFlatL2(res, query.shape[1], faiss.GpuIndexFlatConfig())
+        index = faiss.GpuIndexFlatL2(res, dim, faiss.GpuIndexFlatConfig())
         index.add(t)
+
+        return res, index
+
+    @torch.no_grad()
+    def search_with_index(self, query, res, index, k=8):
+        """Search kNN using a pre-built FAISS index.
+
+        Args:
+            query: (M, D) tensor of query vectors
+            res: FAISS GPU resources (from build_faiss_index)
+            index: FAISS GPU index (from build_faiss_index)
+            k: number of nearest neighbors
+
+        Returns:
+            Tuple of (knn_dists, knn_idx) as tensors on query's device
+        """
+        q = query.cpu().numpy().astype('float32')
         dists, idx = index.search(q, k)
         knn_dists = torch.from_numpy(dists).to(query.device)
         knn_idx = torch.from_numpy(idx).to(query.device)
         return knn_dists, knn_idx
+
+    @torch.no_grad()
+    def faiss_knn(self, query, target, k=8):
+        """Use GPU faiss for fast kNN (creates index each call)."""
+        res, index = self.build_faiss_index(target)
+        return self.search_with_index(query, res, index, k)
 
     @torch.no_grad()
     def lift(
@@ -156,6 +187,9 @@ class DepthAnythingLifter:
 
         positions = gaussians.get_positions()  # (N, 3)
         scales = gaussians.get_scales()  # (N, 3)
+
+        # Build FAISS index once for all kNN searches (reused across views)
+        faiss_res, faiss_index = self.build_faiss_index(positions)
 
         for view_id, (cam, mask) in enumerate(zip(cameras, change_masks)):
             obs = cam.original_image.permute(1, 2, 0).contiguous()
@@ -191,7 +225,7 @@ class DepthAnythingLifter:
                 # dists = torch.cdist(p_world, positions)  # [M, N]
                 # knn_dists, knn_idx = torch.topk(dists, k=min(self.k_nn, N), dim=-1, largest=False)
                 # del dists  # free immediately
-                knn_dists, knn_idx = self.faiss_knn(p_world, positions, k=min(self.k_nn, N))  # [M,k_nn]
+                knn_dists, knn_idx = self.search_with_index(p_world, faiss_res, faiss_index, k=min(self.k_nn, N))  # [M,k]
 
                 # Local scale-aware distance
                 local_scales = scales[knn_idx]  # [M, k, 3]
@@ -265,7 +299,7 @@ class DepthAnythingLifter:
                 # knn_dists_n, knn_idx_n = torch.topk(
                 #     dists_n, k=min(self.k_nn, N), dim=-1, largest=False
                 # )
-                knn_dists_n, knn_idx_n = self.faiss_knn(p_world_n, positions, k=min(self.k_nn, N))
+                knn_dists_n, knn_idx_n = self.search_with_index(p_world_n, faiss_res, faiss_index, k=min(self.k_nn, N))
 
                 local_scales_n = scales[knn_idx_n]
                 denom_n = local_scales_n.norm(dim=-1) + 1e-6
