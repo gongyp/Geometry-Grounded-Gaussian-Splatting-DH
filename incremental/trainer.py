@@ -34,6 +34,16 @@ except ImportError as e:
     CLSplatsConfig = None
     print(f"Warning: Failed to import cl-splats: {e}")
 
+# Import NN-matching detector
+try:
+    from .change_detection.nn_matching_detector import NNMatchingDetector, NNMatchingChangeConfig
+    NN_MATCHING_AVAILABLE = True
+except ImportError as e:
+    NNMatchingDetector = None
+    NNMatchingChangeConfig = None
+    NN_MATCHING_AVAILABLE = False
+    print(f"Warning: Failed to import NN-matching detector: {e}")
+
 log = logging.getLogger(__name__)
 
 
@@ -127,10 +137,41 @@ class IncrementalTrainer:
 
         # Initialize change detector
         self.detector = None
+        self.use_nn_matching = getattr(clsplats_config, 'use_nn_matching', False) if clsplats_config else False
         log.info(f"CL_SPLATS_AVAILABLE: {CL_SPLATS_AVAILABLE}")
+        log.info(f"NN_MATCHING_AVAILABLE: {NN_MATCHING_AVAILABLE}")
         log.info(f"clsplats_config: {clsplats_config}")
+        log.info(f"use_nn_matching: {self.use_nn_matching}")
         try:
-            if CL_SPLATS_AVAILABLE and DinoV2Detector is not None:
+            if self.use_nn_matching and NN_MATCHING_AVAILABLE and NNMatchingDetector is not None:
+                # Use NN-matching detector for better viewpoint robustness
+                if self.clsplats_cfg is not None and hasattr(self.clsplats_cfg, 'change'):
+                    log.info("Creating NNMatchingDetector with config...")
+                    nn_cfg = NNMatchingChangeConfig(
+                        threshold=self.clsplats_cfg.change.threshold,
+                        dilate_mask=True,
+                        dilate_kernel_size=5,
+                        upsample=True,
+                        use_faiss_gpu=True,
+                        k_nn=1,
+                        metric="cosine",
+                    )
+                    self.detector = NNMatchingDetector(nn_cfg)
+                    log.info("NNMatchingDetector created successfully")
+                else:
+                    log.info("Creating NNMatchingDetector with default config...")
+                    nn_cfg = NNMatchingChangeConfig(
+                        threshold=0.7,
+                        dilate_mask=True,
+                        dilate_kernel_size=5,
+                        upsample=True,
+                        use_faiss_gpu=True,
+                        k_nn=1,
+                        metric="cosine",
+                    )
+                    self.detector = NNMatchingDetector(nn_cfg)
+                    log.info("NNMatchingDetector created successfully")
+            elif CL_SPLATS_AVAILABLE and DinoV2Detector is not None:
                 if self.clsplats_cfg is not None:
                     log.info("Creating DinoV2Detector with config...")
                     self.detector = DinoV2Detector(self.clsplats_cfg.change)

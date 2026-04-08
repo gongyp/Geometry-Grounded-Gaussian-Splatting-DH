@@ -203,11 +203,11 @@ class DepthAnythingLifter:
             if pos_pixels.any():
                 ys, xs = torch.nonzero(pos_pixels, as_tuple=True)
                 # Sub-sample to avoid OOM in the kNN distance matrix (M×N).
-                max_pos = min(ys.numel(), 2048)
-                if ys.numel() > max_pos:
-                    perm = torch.randperm(ys.numel(), device=device)[:max_pos]
-                    ys = ys[perm]
-                    xs = xs[perm]
+                # max_pos = min(ys.numel(), 2048)
+                # if ys.numel() > max_pos:
+                #     perm = torch.randperm(ys.numel(), device=device)[:max_pos]
+                #     ys = ys[perm]
+                #     xs = xs[perm]
                 d = depth[ys, xs]
 
                 # Back-project to camera coordinates
@@ -246,9 +246,13 @@ class DepthAnythingLifter:
                     z_knn = knn_cam[..., 2]  # [M, k]
 
                     depth_pix = d.unsqueeze(-1)  # [M, 1]
-                    depth_ok = (z_knn - depth_pix).abs() < (
-                        self.depth_tol_abs + self.depth_tol_rel * depth_pix
-                    )
+                    # NOTE: depth_ok check is disabled by default because Depth-Anything depth
+                    # may have scale/shift offset from Gaussian geometry. This causes most
+                    # Gaussians to fail the depth consistency check even when they're spatially
+                    # close to the backprojected 3D point.
+                    # If re-enabled, consider using much larger tolerance:
+                    # depth_ok = (z_knn - depth_pix).abs() < (depth_tol_abs + depth_tol_rel * depth_pix)
+                    depth_ok = torch.ones_like(valid, dtype=torch.bool)  # All pass
 
                     valid_final = valid & depth_ok  # [M, k]
                     if valid_final.any():
@@ -346,7 +350,7 @@ class DepthAnythingLifter:
         changed_gaussians = score > self.final_thresh
 
         # If too few changed, return all as changed for incremental update
-        if changed_gaussians.sum() < 100:
+        if changed_gaussians.sum() < 50:
             changed_gaussians = torch.ones(N, dtype=torch.bool, device=device)
 
         return LiftResult(
