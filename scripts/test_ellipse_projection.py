@@ -12,8 +12,9 @@ from arguments import ModelParams, OptimizationParams
 from argparse import ArgumentParser
 import time
 
-# Import the ellipse projection algorithm
+# Import the ellipse projection algorithms
 from incremental.lifter.ellipse_projection import batch_project_gaussians_to_pixels
+from incremental.lifter.ellipse_projection_scatter import batch_project_gaussians_to_pixels_scatter
 
 
 def load_model(model_path, source_path, images):
@@ -84,7 +85,7 @@ def build_covariance_from_scales(scales, rotation):
     return covs3d
 
 
-def test_single_camera(gaussian_model, cameras, camera_idx=0, max_gaussians=None):
+def test_single_camera(gaussian_model, cameras, camera_idx=0, max_gaussians=None, version='original'):
     """Test the ellipse projection on a single camera."""
     cam = cameras[camera_idx]
     H, W = cam.image_height, cam.image_width
@@ -128,14 +129,22 @@ def test_single_camera(gaussian_model, cameras, camera_idx=0, max_gaussians=None
     print(f"Image size: {H}x{W}")
 
     # Run ellipse projection
-    print("\nRunning batch_project_gaussians_to_pixels...")
+    print(f"\nRunning {version} version...")
     t0 = time.time()
 
-    pixel_to_gaussian, actual_counts = batch_project_gaussians_to_pixels(
-        means, covs3d, K, R_cam, T_cam, H, W,
-        batch_size=4096,
-        sigma_scale=3.0
-    )
+    if version == 'scatter':
+        pixel_to_gaussian, actual_counts = batch_project_gaussians_to_pixels_scatter(
+            means, covs3d, K, R_cam, T_cam, H, W,
+            batch_size=4096,
+            sigma_scale=3.0,
+            max_gaussians_per_pixel=50
+        )
+    else:
+        pixel_to_gaussian, actual_counts = batch_project_gaussians_to_pixels(
+            means, covs3d, K, R_cam, T_cam, H, W,
+            batch_size=4096,
+            sigma_scale=3.0
+        )
 
     elapsed = time.time() - t0
     print(f"  Done in {elapsed:.2f}s")
@@ -151,21 +160,23 @@ def test_single_camera(gaussian_model, cameras, camera_idx=0, max_gaussians=None
     print(f"Total pixel-gaussian mappings: {total_mappings}")
     print(f"Pixels with at least one Gaussian: {pixels_with_gaussians} / {H*W} ({100*pixels_with_gaussians/(H*W):.2f}%)")
     print(f"Max Gaussians for a single pixel: {max_gaussians_single_pixel}")
-    print(f"Average Gaussians per covered pixel: {total_mappings / pixels_with_gaussians:.2f}")
+    if pixels_with_gaussians > 0:
+        print(f"Average Gaussians per covered pixel: {total_mappings / pixels_with_gaussians:.2f}")
 
     # Show sample
-    print("\nSample pixel mappings:")
-    for vp in range(3):
-        for up in range(3):
+    print("\nSample pixel mappings (first few non-empty):")
+    count = 0
+    for vp in range(min(10, H)):
+        for up in range(min(10, W)):
             cnt = actual_counts[vp, up].item()
-            gaussians = pixel_to_gaussian[vp, up, :cnt].tolist()
-            print(f"  Pixel ({vp}, {up}): {cnt} Gaussians -> {gaussians}")
-
-    # Verify by checking a pixel with many Gaussians
-    max_pixel_v, max_pixel_u = torch.where(actual_counts == max_gaussians_single_pixel)[0][0].item(), torch.where(actual_counts == max_gaussians_single_pixel)[1][0].item()
-    print(f"\nPixel with most Gaussians: ({max_pixel_v}, {max_pixel_u}) with {max_gaussians_single_pixel} Gaussians")
-    gaussians_at_max = pixel_to_gaussian[max_pixel_v, max_pixel_u, :max_gaussians_single_pixel].tolist()
-    print(f"  Gaussian indices: {gaussians_at_max}")
+            if cnt > 0:
+                gaussians = pixel_to_gaussian[vp, up, :cnt].tolist()
+                print(f"  Pixel ({vp}, {up}): {cnt} Gaussians -> {gaussians}")
+                count += 1
+                if count >= 5:
+                    break
+        if count >= 5:
+            break
 
     return pixel_to_gaussian, actual_counts
 
@@ -178,6 +189,7 @@ def main():
     parser.add_argument("--images", type=str, default="images")
     parser.add_argument("--camera_idx", type=int, default=0)
     parser.add_argument("--max_gaussians", type=int, default=100000)
+    parser.add_argument("--version", type=str, default="original", choices=["original", "scatter"])
     args = parser.parse_args()
 
     print("Loading model...")
@@ -188,7 +200,8 @@ def main():
     pixel_to_gaussian, actual_counts = test_single_camera(
         gaussian_model, cameras,
         camera_idx=args.camera_idx,
-        max_gaussians=args.max_gaussians
+        max_gaussians=args.max_gaussians,
+        version=args.version
     )
 
     print("\n=== Test completed successfully ===")

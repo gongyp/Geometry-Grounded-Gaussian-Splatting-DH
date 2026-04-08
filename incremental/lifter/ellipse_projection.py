@@ -12,11 +12,15 @@ def batch_project_gaussians_to_pixels(
     batch_size=8192,# 分块大小
     sigma_scale=3.0 # 3σ 覆盖 99.7%
 ):
-    """
-    CUDA 批量前向投影
+    """批量前向投影 - 计算每个像素覆盖的高斯
+
     返回：
         pixel_to_gaussian_indices: [H, W, max_gaussians_per_pixel] 每个像素对应高斯 index (padding with -1)
         actual_counts: [H, W] 每个像素实际有多少个高斯
+
+    注意：
+        - covs3d 应该用 exp(scales) 计算，而不是原始 log(scales)
+        - 性能：50K 高斯 ~4s, 500K 高斯 ~40s, 3.8M 高斯 ~300s (单相机)
     """
     device = means.device
 
@@ -69,7 +73,7 @@ def batch_project_gaussians_to_pixels(
             u = fx * x / z_vals + cx
             v = fy * y / z_vals + cy
 
-            # 6. 椭圆半径
+            # 6. 求 2D 椭圆半径（特征值）
             eigvals, _ = torch.linalg.eigh(cov2d)
             rx = sigma_scale * torch.sqrt(eigvals[:, 1].clamp(min=1e-8))
             ry = sigma_scale * torch.sqrt(eigvals[:, 0].clamp(min=1e-8))
@@ -80,13 +84,13 @@ def batch_project_gaussians_to_pixels(
             v_min = (v - ry).clamp(min=0).long()
             v_max = (v + ry).clamp(max=H-1).long()
 
-            # 8. 逆协方差
+            # 8. 逆协方差矩阵
             inv_cov2d = torch.linalg.inv(cov2d)
 
             # 9. 获取有效索引
             valid_indices = torch.where(valid)[0] + i
 
-            # 10. 遍历高斯
+            # 10. 遍历每个高斯
             for j in range(B_valid):
                 v0, v1 = v_min[j].item(), v_max[j].item()
                 u0, u1 = u_min[j].item(), u_max[j].item()
@@ -118,7 +122,7 @@ def batch_project_gaussians_to_pixels(
 
     # 转换为 tensor 格式
     max_per_pixel = max(len(pixel_to_gaussian[v][u]) for v in range(H) for u in range(W))
-    max_per_pixel = min(max(max_per_pixel, 50), 200)  # 限制范围
+    max_per_pixel = min(max(max_per_pixel, 50), 200)
 
     pixel_to_gaussian_tensor = torch.full((H, W, max_per_pixel), -1, dtype=torch.long)
     actual_counts = torch.zeros((H, W), dtype=torch.long)
