@@ -195,23 +195,38 @@ class IncrementalTrainer:
         self.lifter = None
         self.sg_lifter = None
         if CL_SPLATS_AVAILABLE and self.clsplats_cfg is not None:
-            from .lifter.depth_anything_lifter import DepthAnythingLifter
-            base_lifter = DepthAnythingLifter(
-                depth_model=self.clsplats_cfg.lifter.depth_model,
-                k_nn=self.clsplats_cfg.lifter.k_nn,
-                local_radius_thresh=self.clsplats_cfg.lifter.local_radius_thresh,
-                depth_tol_abs=self.clsplats_cfg.lifter.depth_tol_abs,
-                depth_tol_rel=self.clsplats_cfg.lifter.depth_tol_rel,
-                lambda_seed=self.clsplats_cfg.lifter.lambda_seed,
-                lambda_neg=self.clsplats_cfg.lifter.lambda_neg,
-                min_visible_views=self.clsplats_cfg.lifter.min_visible_views,
-                min_positive_views=self.clsplats_cfg.lifter.min_positive_views,
-                min_seed_views=self.clsplats_cfg.lifter.min_seed_views,
-                min_positive_ratio=self.clsplats_cfg.lifter.min_positive_ratio,
-                final_thresh=self.clsplats_cfg.lifter.final_thresh,
-            )
-            # Use the new lifter directly
-            self.sg_lifter = base_lifter
+            # Check which lifter to use
+            use_ellipse = getattr(self.clsplats_cfg, 'use_ellipse_lifter', False)
+            if use_ellipse:
+                from .lifter.ellipse_projection_lifter import EllipseProjectionLifter
+                self.sg_lifter = EllipseProjectionLifter(
+                    k_nn=self.clsplats_cfg.lifter.k_nn,
+                    coverage_threshold=getattr(self.clsplats_cfg.lifter, 'coverage_threshold', 9.21),
+                    min_visible_views=self.clsplats_cfg.lifter.min_visible_views,
+                    min_positive_views=self.clsplats_cfg.lifter.min_positive_views,
+                    min_seed_views=self.clsplats_cfg.lifter.min_seed_views,
+                    min_positive_ratio=self.clsplats_cfg.lifter.min_positive_ratio,
+                    final_thresh=self.clsplats_cfg.lifter.final_thresh,
+                )
+                log.info("Using EllipseProjectionLifter")
+            else:
+                from .lifter.depth_anything_lifter import DepthAnythingLifter
+                base_lifter = DepthAnythingLifter(
+                    depth_model=self.clsplats_cfg.lifter.depth_model,
+                    k_nn=self.clsplats_cfg.lifter.k_nn,
+                    local_radius_thresh=self.clsplats_cfg.lifter.local_radius_thresh,
+                    depth_tol_abs=self.clsplats_cfg.lifter.depth_tol_abs,
+                    depth_tol_rel=self.clsplats_cfg.lifter.depth_tol_rel,
+                    lambda_seed=self.clsplats_cfg.lifter.lambda_seed,
+                    lambda_neg=self.clsplats_cfg.lifter.lambda_neg,
+                    min_visible_views=self.clsplats_cfg.lifter.min_visible_views,
+                    min_positive_views=self.clsplats_cfg.lifter.min_positive_views,
+                    min_seed_views=self.clsplats_cfg.lifter.min_seed_views,
+                    min_positive_ratio=self.clsplats_cfg.lifter.min_positive_ratio,
+                    final_thresh=self.clsplats_cfg.lifter.final_thresh,
+                )
+                self.sg_lifter = base_lifter
+                log.info("Using DepthAnythingLifter")
 
         # Training state
         self.timestep = 0
