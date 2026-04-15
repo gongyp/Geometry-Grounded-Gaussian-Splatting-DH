@@ -56,9 +56,14 @@ public:
         float* out_mdepth,
         float* out_alpha,
         float* out_normal,
-        int* radii         = nullptr,
-        bool require_depth = true,
-        bool debug         = false);
+        int* radii              = nullptr,
+        int* topk_ids           = nullptr,
+        float* topk_weights     = nullptr,
+        int* topk_valid_count   = nullptr,
+        bool require_depth      = true,
+        bool enable_topk        = false,
+        int topk_k              = 1,
+        bool debug              = false);
 
     static void backward(
         std::function<char*(size_t)> geometryBuffer,

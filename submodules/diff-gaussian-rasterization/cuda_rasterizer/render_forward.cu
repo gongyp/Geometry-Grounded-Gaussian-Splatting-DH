@@ -407,7 +407,12 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         float* __restrict__ out_alpha,
         float* __restrict__ out_normal,
         float* __restrict__ out_mdepth,
-        float* __restrict__ normal_length) {
+        float* __restrict__ normal_length,
+        int* __restrict__ topk_ids,
+        float* __restrict__ topk_weights,
+        int* __restrict__ topk_valid_count,
+        bool enable_topk,
+        int topk_k) {
     // Identify current tile and associated min/max pixel range.
     auto block                 = cg::this_thread_block();
     uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
@@ -447,6 +452,10 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     [[maybe_unused]] float last_depth  = 0;
     [[maybe_unused]] float last_weight = 0;
     [[maybe_unused]] float mDepthinit  = 0;
+    const int topk_limit               = enable_topk ? max(0, min(topk_k, 3)) : 0;
+    int local_topk_ids[3]              = {-1, -1, -1};
+    float local_topk_weights[3]        = {0.f, 0.f, 0.f};
+    int local_topk_valid_count         = 0;
 #ifdef MOST_VISIBLE_INIT
     [[maybe_unused]] float max_weight = 0;
 #endif
@@ -501,6 +510,21 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             }
 
             const float aT = alpha * T;
+            if (topk_limit > 0 && aT > 0.f) {
+                const int coll_id = point_list[range.x + i * BLOCK_SIZE + j];
+                int insert_pos    = min(local_topk_valid_count, topk_limit - 1);
+                while (insert_pos > 0 && aT > local_topk_weights[insert_pos - 1]) {
+                    local_topk_ids[insert_pos]     = local_topk_ids[insert_pos - 1];
+                    local_topk_weights[insert_pos] = local_topk_weights[insert_pos - 1];
+                    insert_pos--;
+                }
+                if (local_topk_valid_count < topk_limit || insert_pos < topk_limit - 1 || aT > local_topk_weights[insert_pos]) {
+                    local_topk_ids[insert_pos]     = coll_id;
+                    local_topk_weights[insert_pos] = aT;
+                    if (local_topk_valid_count < topk_limit)
+                        local_topk_valid_count++;
+                }
+            }
             // Eq. (3) from 3D Gaussian splatting paper.
             for (int ch = 0; ch < CHANNELS; ch++)
                 C[ch] += collected_feature[j + BLOCK_SIZE * ch] * aT;
@@ -646,6 +670,14 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     // rendering data to the frame and auxiliary buffers.
     if (inside) {
         n_contrib[pix_id] = last_contributor;
+        if (topk_limit > 0) {
+#pragma unroll
+            for (int k = 0; k < 3; k++) {
+                topk_ids[k * H * W + pix_id]     = local_topk_ids[k];
+                topk_weights[k * H * W + pix_id] = local_topk_weights[k];
+            }
+            topk_valid_count[pix_id] = local_topk_valid_count;
+        }
 #pragma unroll
         for (int ch = 0; ch < CHANNELS; ch++)
             out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
@@ -690,13 +722,19 @@ void FORWARD::render(
     float* out_normal,
     float* out_mdepth,
     float* normal_length,
+    int* topk_ids,
+    float* topk_weights,
+    int* topk_valid_count,
+    bool enable_topk,
+    int topk_k,
     bool require_depth) {
 #define RENDER_CUDA_CALL(template_depth)                                                \
     renderCUDA<NUM_CHANNELS, template_depth, SPLIT, SPLIT_ITERATIONS><<<grid, block>>>( \
         ranges, point_list, W, H, means2D, conic_opacity, colors,                       \
         ray_planes, normals, focal_x, focal_y,                                          \
         n_contrib, max_contributor, bg_color, out_color, out_alpha,                     \
-        out_normal, out_mdepth, normal_length)
+        out_normal, out_mdepth, normal_length,                                          \
+        topk_ids, topk_weights, topk_valid_count, enable_topk, topk_k)
 
     if (require_depth)
         RENDER_CUDA_CALL(true);

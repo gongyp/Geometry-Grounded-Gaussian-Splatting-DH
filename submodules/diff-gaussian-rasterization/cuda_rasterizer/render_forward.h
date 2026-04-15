@@ -73,6 +73,11 @@ void render(
     float* out_normal,
     float* out_mdepth,
     float* normal_length,
+    int* topk_ids,
+    float* topk_weights,
+    int* topk_valid_count,
+    bool enable_topk,
+    int topk_k,
     bool require_depth);
 } // namespace FORWARD
 

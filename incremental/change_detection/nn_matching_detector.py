@@ -40,6 +40,13 @@ class NNMatchingDetector(BaseDetector):
         self.normalize = torchvision.transforms.Normalize(
             mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
         )
+        self._faiss_gpu_temp_memory_bytes = [
+            256 * 1024 * 1024,
+            128 * 1024 * 1024,
+            64 * 1024 * 1024,
+            16 * 1024 * 1024,
+            0,
+        ]
 
     def _preprocess_image(self, image: Image) -> torch.Tensor:
         """Resize to DINO-compatible dimensions and apply ImageNet normalisation."""
@@ -88,11 +95,29 @@ class NNMatchingDetector(BaseDetector):
             features_np = features_np / norms
 
         if self.cfg.use_faiss_gpu and faiss.get_num_gpus() > 0:
-            res = faiss.StandardGpuResources()
-            index = faiss.GpuIndexFlatL2(res, C, faiss.GpuIndexFlatConfig())
-        else:
-            index = faiss.IndexFlatL2(C)
+            last_error = None
+            for temp_bytes in self._faiss_gpu_temp_memory_bytes:
+                try:
+                    res = faiss.StandardGpuResources()
+                    if hasattr(res, "setTempMemory"):
+                        res.setTempMemory(temp_bytes)
+                    config = faiss.GpuIndexFlatConfig()
+                    config.device = 0
+                    index = faiss.GpuIndexFlatL2(res, C, config)
+                    index.add(features_np)
+                    return index
+                except RuntimeError as e:
+                    last_error = e
+                    log.warning(
+                        f"FAISS GPU index creation failed with temp_memory={temp_bytes} bytes: {e}"
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+            raise RuntimeError(
+                f"FAISS GPU index creation failed after retries with reduced temp memory: {last_error}"
+            )
 
+        index = faiss.IndexFlatL2(C)
         index.add(features_np)
         return index
 

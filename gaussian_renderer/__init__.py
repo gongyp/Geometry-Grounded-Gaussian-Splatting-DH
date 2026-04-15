@@ -10,7 +10,14 @@
 #
 
 import math
+import sys
+from pathlib import Path
 import torch
+
+_local_dgr_path = Path(__file__).resolve().parent.parent / "submodules" / "diff-gaussian-rasterization"
+if str(_local_dgr_path) not in sys.path:
+    sys.path.insert(0, str(_local_dgr_path))
+
 from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
     GaussianRasterizer,
@@ -26,6 +33,8 @@ def render(
     kernel_size,
     scaling_modifier=1.0,
     require_depth: bool = True,
+    topk_k: int = 1,
+    return_topk: bool = False,
 ):
     """
     Render the scene.
@@ -47,6 +56,8 @@ def render(
     except:
         pass
 
+    topk_k = max(1, min(int(topk_k), 3))
+
     raster_settings = GaussianRasterizationSettings(
         image_height=int(viewpoint_camera.image_height),
         image_width=int(viewpoint_camera.image_width),
@@ -62,6 +73,8 @@ def render(
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         require_depth=require_depth,
+        enable_topk=return_topk,
+        topk_k=topk_k,
         debug=pipe.debug,
     )
 
@@ -87,25 +100,32 @@ def render(
     sg_sharpness = pc.get_sg_sharpness
     sg_color = pc.get_sg_color
 
-    rendered_image, radii, rendered_median_depth, rendered_alpha, rendered_normal = (
-        rasterizer(
-            means3D=means3D,
-            means2D=means2D,
-            shs=shs,
-            sg_axis=sg_axis,
-            sg_sharpness=sg_sharpness,
-            sg_color=sg_color,
-            colors_precomp=colors_precomp,
-            opacities=opacity,
-            scales=scales,
-            rotations=rotations,
-            cov3Ds_precomp=cov3Ds_precomp,
-        )
+    (
+        rendered_image,
+        radii,
+        rendered_median_depth,
+        rendered_alpha,
+        rendered_normal,
+        topk_ids,
+        topk_weights,
+        topk_valid_count,
+    ) = rasterizer(
+        means3D=means3D,
+        means2D=means2D,
+        shs=shs,
+        sg_axis=sg_axis,
+        sg_sharpness=sg_sharpness,
+        sg_color=sg_color,
+        colors_precomp=colors_precomp,
+        opacities=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3Ds_precomp=cov3Ds_precomp,
     )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    return {
+    render_pkg = {
         "render": rendered_image,
         "mask": rendered_alpha,
         "median_depth": rendered_median_depth,
@@ -114,6 +134,15 @@ def render(
         "radii": radii,
         "normal": rendered_normal,
     }
+    if return_topk:
+        render_pkg.update(
+            {
+                "topk_ids": topk_ids[:topk_k],
+                "topk_weights": topk_weights[:topk_k],
+                "topk_valid_count": topk_valid_count,
+            }
+        )
+    return render_pkg
 
 
 def evaluate_transmittance(
@@ -146,8 +175,10 @@ def evaluate_transmittance(
         sg_degree=pc.active_sg_degree,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
-        debug=pipe.debug,
         require_depth=True,
+        enable_topk=False,
+        topk_k=1,
+        debug=pipe.debug,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -211,8 +242,10 @@ def evaluate_sdf(
         sg_degree=pc.active_sg_degree,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
-        debug=pipe.debug,
         require_depth=True,
+        enable_topk=False,
+        topk_k=1,
+        debug=pipe.debug,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)

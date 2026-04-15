@@ -18,8 +18,7 @@ sys.path.insert(0, '/data/Geometry-Grounded-Gaussian-Splatting/submodules/cl-spl
 
 from scene.gaussian_model import GaussianModel
 from .gaussian_adapter import GGSGaussianAdapter
-from .render_adapter import GGSRenderAdapter
-from .lifter.depth_anything_lifter import DepthAnythingLifter
+from .render_adapter import GGSRenderAdapter, RenderOutput
 
 # Import cl-splats components
 try:
@@ -191,13 +190,28 @@ class IncrementalTrainer:
         except Exception as e:
             log.error(f"Failed to create detector: {e}")
 
-        # Initialize lifter (if cl-splats available)
+        # Initialize lifter
         self.lifter = None
         self.sg_lifter = None
-        if CL_SPLATS_AVAILABLE and self.clsplats_cfg is not None:
+        if self.clsplats_cfg is not None:
             # Check which lifter to use
+            use_topk_attribution = getattr(self.clsplats_cfg, 'use_topk_attribution_lifter', False)
             use_ellipse = getattr(self.clsplats_cfg, 'use_ellipse_lifter', False)
-            if use_ellipse:
+            if use_topk_attribution:
+                from .lifter.topk_attribution_lifter import TopKAttributionLifter
+                self.sg_lifter = TopKAttributionLifter(
+                    lambda_seed=self.clsplats_cfg.lifter.lambda_seed,
+                    lambda_neg=self.clsplats_cfg.lifter.lambda_neg,
+                    min_visible_views=self.clsplats_cfg.lifter.min_visible_views,
+                    min_positive_views=self.clsplats_cfg.lifter.min_positive_views,
+                    min_seed_views=self.clsplats_cfg.lifter.min_seed_views,
+                    min_positive_ratio=self.clsplats_cfg.lifter.min_positive_ratio,
+                    final_thresh=self.clsplats_cfg.lifter.final_thresh,
+                    topk_k=getattr(self.clsplats_cfg.lifter, 'topk_k', 3),
+                    min_positive_weight=getattr(self.clsplats_cfg.lifter, 'min_positive_weight', 0.05),
+                )
+                log.info("Using TopKAttributionLifter")
+            elif use_ellipse:
                 from .lifter.ellipse_projection_lifter import EllipseProjectionLifter
                 self.sg_lifter = EllipseProjectionLifter(
                     k_nn=self.clsplats_cfg.lifter.k_nn,
@@ -209,7 +223,7 @@ class IncrementalTrainer:
                     final_thresh=self.clsplats_cfg.lifter.final_thresh,
                 )
                 log.info("Using EllipseProjectionLifter")
-            else:
+            elif CL_SPLATS_AVAILABLE:
                 from .lifter.depth_anything_lifter import DepthAnythingLifter
                 base_lifter = DepthAnythingLifter(
                     depth_model=self.clsplats_cfg.lifter.depth_model,
@@ -272,23 +286,33 @@ class IncrementalTrainer:
         self,
         change_masks: List[torch.Tensor],
         cameras: List = None,
+        render_outputs: Optional[List[RenderOutput]] = None,
     ) -> torch.Tensor:
         """Lift 2D change masks to 3D Gaussian mask.
 
         Args:
             change_masks: List of change masks for each camera
             cameras: List of cameras corresponding to change_masks
+            render_outputs: Optional render outputs aligned with change_masks
 
         Returns:
             3D change mask: (N,) boolean mask for Gaussians
         """
         if self.sg_lifter is not None:
             # Use SG-aware lifter (use cameras param, not self.cameras)
-            result = self.sg_lifter.lift(
-                self.adapter,
-                cameras,  # Use the filtered cameras that have change_masks
-                change_masks,
-            )
+            if self._requires_topk_render():
+                result = self.sg_lifter.lift(
+                    self.adapter,
+                    cameras,
+                    change_masks,
+                    render_outputs=render_outputs,
+                )
+            else:
+                result = self.sg_lifter.lift(
+                    self.adapter,
+                    cameras,
+                    change_masks,
+                )
             return result.positive_mask
 
         elif self.lifter is not None:
@@ -356,11 +380,18 @@ class IncrementalTrainer:
 
         return loss, psnr
 
-    def render_camera(self, camera) -> Dict[str, torch.Tensor]:
+    def render_camera(
+        self,
+        camera,
+        return_topk: bool = False,
+        topk_k: int = 3,
+    ) -> Dict[str, torch.Tensor]:
         """Render from a single camera using base GaussianModel directly.
 
         Args:
             camera: Camera object
+            return_topk: Whether to return per-pixel Top-K contributor buffers
+            topk_k: Number of Top-K contributor slots to request
 
         Returns:
             Dict with 'image', 'depth', 'alpha', 'radii', 'viewspace_points', 'visibility_filter'
@@ -387,6 +418,8 @@ class IncrementalTrainer:
                 kernel_size=kernel_size,
                 scaling_modifier=1.0,
                 require_depth=True,
+                return_topk=return_topk,
+                topk_k=topk_k,
             )
         except Exception as e:
             print(f"Render failed: {e}")
@@ -399,7 +432,18 @@ class IncrementalTrainer:
             "radii": result["radii"],
             "viewspace_points": result.get("viewspace_points"),
             "visibility_filter": result.get("visibility_filter"),
+            "topk_ids": result.get("topk_ids"),
+            "topk_weights": result.get("topk_weights"),
+            "topk_valid_count": result.get("topk_valid_count"),
         }
+
+    def _requires_topk_render(self) -> bool:
+        return self.sg_lifter is not None and self.sg_lifter.__class__.__name__ == "TopKAttributionLifter"
+
+    def _topk_k(self) -> int:
+        if self._requires_topk_render() and hasattr(self.sg_lifter, "topk_k"):
+            return int(self.sg_lifter.topk_k)
+        return 3
 
     def apply_constraints(self) -> None:
         """Apply geometric constraints to Gaussians."""
@@ -913,21 +957,46 @@ class IncrementalTrainer:
             if self.detector is None:
                 log.info("Using fallback change detection (simple difference)")
             change_masks = []
+            render_outputs = []
 
             for i, (camera, target) in enumerate(zip(cd_cameras, cd_images)):
                 # Render current state
-                output = self.render_camera(camera)
+                output = self.render_camera(
+                    camera,
+                    return_topk=self._requires_topk_render(),
+                    topk_k=self._topk_k(),
+                )
                 rendered = output["image"]
+
+                if self._requires_topk_render():
+                    render_outputs.append(
+                        {
+                            "topk_ids": output["topk_ids"].detach().cpu() if output.get("topk_ids") is not None else None,
+                            "topk_weights": output["topk_weights"].detach().cpu() if output.get("topk_weights") is not None else None,
+                            "topk_valid_count": output["topk_valid_count"].detach().cpu() if output.get("topk_valid_count") is not None else None,
+                        }
+                    )
+                else:
+                    render_outputs.append(output)
 
                 # Detect changes
                 change_mask = self.detect_changes(rendered, target)
-                change_masks.append(change_mask)
+                change_masks.append(change_mask.detach().cpu() if self._requires_topk_render() else change_mask)
                 cam_id = camera.colmap_id if hasattr(camera, 'colmap_id') else i
                 log.info(f"Camera {cam_id}: change mask sum = {change_mask.sum()}")
 
+                del rendered
+                del output
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
             # Lift changes to 3D
             log.info("Lifting 2D changes to 3D...")
-            self.active_mask = self.lift_changes_to_3d(change_masks, cd_cameras)
+            self.active_mask = self.lift_changes_to_3d(
+                change_masks,
+                cd_cameras,
+                render_outputs=render_outputs,
+            )
 
             log.info(f"Active Gaussians after change detection: {self.active_mask.sum()} / {N}")
         else:

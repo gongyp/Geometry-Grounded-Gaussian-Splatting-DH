@@ -313,7 +313,12 @@ int CudaRasterizer::Rasterizer::forward(
     float* out_alpha,
     float* out_normal,
     int* radii,
+    int* topk_ids,
+    float* topk_weights,
+    int* topk_valid_count,
     bool require_depth,
+    bool enable_topk,
+    int topk_k,
     bool debug) {
     const float focal_y = height / (2.0f * tan_fovy);
     const float focal_x = width / (2.0f * tan_fovx);
@@ -442,6 +447,11 @@ int CudaRasterizer::Rasterizer::forward(
                    out_normal,
                    out_mdepth,
                    imgState.normal_length,
+                   topk_ids,
+                   topk_weights,
+                   topk_valid_count,
+                   enable_topk,
+                   topk_k,
                    require_depth),
                debug);
     return num_rendered;

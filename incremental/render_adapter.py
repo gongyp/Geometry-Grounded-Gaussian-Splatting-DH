@@ -26,6 +26,9 @@ class RenderOutput:
     radii: Optional[torch.Tensor] = None  # (N,)
     viewspace_points: Optional[torch.Tensor] = None  # (N, 3)
     visibility_filter: Optional[torch.Tensor] = None  # (N,)
+    topk_ids: Optional[torch.Tensor] = None  # (K, H, W)
+    topk_weights: Optional[torch.Tensor] = None  # (K, H, W)
+    topk_valid_count: Optional[torch.Tensor] = None  # (H, W)
 
 
 class GGSRenderAdapter:
@@ -74,6 +77,8 @@ class GGSRenderAdapter:
         camera,
         scaling_modifier: float = 1.0,
         require_depth: bool = True,
+        return_topk: bool = False,
+        topk_k: int = 3,
     ) -> RenderOutput:
         """Render the scene from a camera viewpoint.
 
@@ -81,6 +86,8 @@ class GGSRenderAdapter:
             camera: Camera object with required attributes
             scaling_modifier: Scale modifier for 3D filters
             require_depth: Whether to compute depth
+            return_topk: Whether to return per-pixel Top-K contributor buffers
+            topk_k: Number of Top-K contributor slots to request
 
         Returns:
             RenderOutput object with rendered image, alpha, depth, etc.
@@ -93,6 +100,8 @@ class GGSRenderAdapter:
             kernel_size=self.kernel_size,
             scaling_modifier=scaling_modifier,
             require_depth=require_depth,
+            return_topk=return_topk,
+            topk_k=topk_k,
         )
 
         rendered_image = result["render"]
@@ -113,6 +122,9 @@ class GGSRenderAdapter:
             radii=radii,
             viewspace_points=result.get("viewspace_points"),
             visibility_filter=result.get("visibility_filter"),
+            topk_ids=result.get("topk_ids"),
+            topk_weights=result.get("topk_weights"),
+            topk_valid_count=result.get("topk_valid_count"),
         )
 
     def render_batch(
@@ -120,6 +132,8 @@ class GGSRenderAdapter:
         cameras: list,
         scaling_modifier: float = 1.0,
         require_depth: bool = True,
+        return_topk: bool = False,
+        topk_k: int = 3,
     ) -> list[RenderOutput]:
         """Render a batch of cameras.
 
@@ -127,6 +141,8 @@ class GGSRenderAdapter:
             cameras: List of camera objects
             scaling_modifier: Scale modifier for 3D filters
             require_depth: Whether to compute depth
+            return_topk: Whether to return per-pixel Top-K contributor buffers
+            topk_k: Number of Top-K contributor slots to request
 
         Returns:
             List of RenderOutput objects
@@ -137,6 +153,8 @@ class GGSRenderAdapter:
                 camera,
                 scaling_modifier=scaling_modifier,
                 require_depth=require_depth,
+                return_topk=return_topk,
+                topk_k=topk_k,
             )
             outputs.append(output)
         return outputs

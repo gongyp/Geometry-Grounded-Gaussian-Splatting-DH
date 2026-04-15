@@ -36,7 +36,7 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     return lambda;
 }
 
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
     const torch::Tensor& background,
     const torch::Tensor& means3D,
@@ -62,6 +62,8 @@ RasterizeGaussiansCUDA(
     const torch::Tensor& campos,
     const bool prefiltered,
     const bool require_depth,
+    const bool enable_topk,
+    const int topk_k,
     const bool debug) {
     if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
         AT_ERROR("means3D must have dimensions (num_points, 3)");
@@ -79,6 +81,9 @@ RasterizeGaussiansCUDA(
     torch::Tensor out_alpha  = torch::full({1, H, W}, 0.0, float_opts);
     torch::Tensor out_normal = torch::full({3, H, W}, 0.0, float_opts);
     torch::Tensor radii      = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
+    torch::Tensor topk_ids = torch::full({3, H, W}, -1, int_opts);
+    torch::Tensor topk_weights = torch::full({3, H, W}, 0.0, float_opts);
+    torch::Tensor topk_valid_count = torch::full({1, H, W}, 0, int_opts);
 
     torch::Device device(torch::kCUDA);
     torch::TensorOptions options(torch::kByte);
@@ -132,10 +137,28 @@ RasterizeGaussiansCUDA(
             out_alpha.contiguous().data_ptr<float>(),
             out_normal.contiguous().data_ptr<float>(),
             radii.contiguous().data_ptr<int>(),
+            topk_ids.contiguous().data_ptr<int>(),
+            topk_weights.contiguous().data_ptr<float>(),
+            topk_valid_count.contiguous().data_ptr<int>(),
             require_depth,
+            enable_topk,
+            topk_k,
             debug);
     }
-    return std::make_tuple(rendered, out_color, out_alpha, out_normal, out_mdepth, radii, geomBuffer, binningBuffer, imgBuffer, tileBuffer);
+    return std::make_tuple(
+        rendered,
+        out_color,
+        out_alpha,
+        out_normal,
+        out_mdepth,
+        radii,
+        topk_ids,
+        topk_weights,
+        topk_valid_count,
+        geomBuffer,
+        binningBuffer,
+        imgBuffer,
+        tileBuffer);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
